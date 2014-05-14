@@ -1,6 +1,6 @@
 package Linux::Proc::Net::TCP;
 
-our $VERSION = '0.06';
+our $VERSION = '0.07';
 
 use strict;
 use warnings;
@@ -8,74 +8,12 @@ use warnings;
 use Carp;
 use Scalar::Util;
 
+require Linux::Proc::Net::TCP::Base;
+our @ISA = qw(Linux::Proc::Net::TCP::Base);
+
 sub read {
-    my ($class, %opts) = @_;
-
-    my $ip4 = delete $opts{ip4};
-    my $ip6 = delete $opts{ip6};
-    my $mnt = delete $opts{mnt};
-    my $files = delete $opts{files};
-
-    %opts and croak "Unknown option(s) ". join(", ", sort keys %opts);
-
-    my @fn;
-    if ($files) {
-        @fn = @$files;
-    }
-    else {
-        $mnt = "/proc" unless defined $mnt;
-
-        unless (-d $mnt and (stat _)[12] == 0) {
-            croak "$mnt is not a proc filesystem";
-        }
-
-        push @fn, "$mnt/net/tcp"  unless (defined $ip4 and not $ip4);
-        push @fn, "$mnt/net/tcp6" if (defined $ip6 ? -f "$mnt/net/tcp6" : $ip6);
-    }
-
-    my @entries;
-    for my $fn (@fn) {
-        local $_;
-        open my $fh, '<', $fn
-            or croak "Unable to open $fn: $!";
-        <$fh>; # discard header
-        while (<$fh>) {
-            my @entry = /^\s*
-                         (\d+):\s                                     # sl                        -  0
-                         ([\dA-F]{8}(?:[\dA-F]{24})?):([\dA-F]{4})\s  # local address and port    -  1 &  2
-                         ([\dA-F]{8}(?:[\dA-F]{24})?):([\dA-F]{4})\s  # remote address and port   -  3 &  4
-                         ([\dA-F]{2})\s                               # st                        -  5
-                         ([\dA-F]{8}):([\dA-F]{8})\s                  # tx_queue and rx_queue     -  6 &  7
-                         (\d\d):([\dA-F]{8}|F{9,}|1AD7F[\dA-F]{6})\s  # tr and tm->when           -  8 &  9
-                         ([\dA-F]{8})\s+                              # retrnsmt                  - 10
-                         (\d+)\s+                                     # uid                       - 11
-                         (\d+)\s+                                     # timeout                   - 12
-                         (\d+)\s+                                     # inode                     - 13
-                         (\d+)\s+                                     # ref count                 - 14
-                         ((?:[\dA-F]{8}){1,2})                        # memory address            - 15
-                         (?:
-                             \s+
-                             (\d+)\s+                                 # retransmit timeout        - 16
-                             (\d+)\s+                                 # predicted tick            - 17
-                             (\d+)\s+                                 # ack.quick                 - 18
-                             (\d+)\s+                                 # sending congestion window - 19
-                             (-?\d+)                                  # slow start size threshold - 20
-                         )?
-                         \s*
-                         (.*)                                         # more                      - 21
-                         $
-                        /xi;
-            if (@entry) {
-                my $entry = \@entry;
-                bless $entry, 'Linux::Proc::Net::TCP::Entry';
-                push @entries, $entry
-            }
-            else {
-                warn "unparseable line: $_";
-            }
-        }
-    }
-    bless \@entries, $class;
+    my $class = shift;
+    $class->_read(_proto => 'tcp', @_);
 }
 
 sub listeners {
@@ -98,6 +36,7 @@ sub listener_ports {
 }
 
 package Linux::Proc::Net::TCP::Entry;
+our @ISA = qw(Linux::Proc::Net::TCP::Base::Entry);
 
 my @st_names = ( undef,
 		 qw(ESTABLISHED
@@ -112,39 +51,14 @@ my @st_names = ( undef,
 		    LISTEN
 		    CLOSING) );
 
-sub _st2dual {
+sub _tcp_st2dual {
     my $st = hex shift;
     my $name = $st_names[$st];
     (defined $name ? Scalar::Util::dualvar($st, $name) : $st);
 }
 
-sub _hex2ip {
-    my $bin = pack "C*" => map hex, $_[0] =~ /../g;
-    my @l = unpack "L*", $bin;
-    if (@l == 4) {
-        return join ':', map { sprintf "%x:%x", $_ >> 16, $_ & 0xffff } @l;
-    }
-    elsif (@l == 1) {
-        return join '.', map { $_ >> 24, ($_ >> 16 ) & 0xff, ($_ >> 8) & 0xff, $_ & 0xff } @l;
-    }
-    else { die "internal error: bad hexadecimal encoded IP address '$_[0]'" }
-}
+sub st                        { _tcp_st2dual shift->[ 5] }
 
-sub sl                        {          shift->[ 0] }
-sub local_address             { _hex2ip  shift->[ 1] }
-sub local_port                { hex      shift->[ 2] }
-sub rem_address               { _hex2ip  shift->[ 3] }
-sub rem_port                  { hex      shift->[ 4] }
-sub st                        { _st2dual shift->[ 5] }
-sub tx_queue                  { hex      shift->[ 6] }
-sub rx_queue                  { hex      shift->[ 7] }
-sub timer                     {          shift->[ 8] }
-sub retrnsmt                  { hex      shift->[10] }
-sub uid                       {          shift->[11] }
-sub timeout                   {          shift->[12] }
-sub inode                     {          shift->[13] }
-sub reference_count           {          shift->[14] }
-sub memory_address            { hex      shift->[15] }
 sub retransmit_timeout        {          shift->[16] }
 sub predicted_tick            {          shift->[17] }
 sub ack_quick                 {          ( shift->[18] || 0 ) >> 1 }
@@ -152,14 +66,7 @@ sub ack_pingpong              {          ( shift->[18] || 0 ) &  1 }
 sub sending_congestion_window {          shift->[19] }
 sub slow_start_size_threshold {          shift->[20] }
 sub _more                     {          shift->[21] }
-sub ip4                       { length(shift->[ 1]) ==  8 }
-sub ip6                       { length(shift->[ 1]) == 32 }
 
-
-sub tm_when { # work around bug in Linux kernel
-    my $when = shift->[9];
-    $when =~ /^(?:F{8,}|1AD7F[\dA-F]{6})$/ ? -1 : hex $when
-}
 
 
 1;
@@ -241,7 +148,7 @@ returns a list of the entries that are listeners:
 
 returns the list of TCP ports where there are some service listening.
 
-This method can be used to find some unallocated port:
+This method can be used to find some unused port:
 
   my @used_ports = Linux::Proc::Net::TCP->read->listener_ports;
   my %used_port = map { $_ => 1 } @used_ports;
@@ -326,7 +233,7 @@ Salvador FandiE<ntilde>o E<lt>sfandino@yahoo.comE<gt>
 
 =head1 COPYRIGHT AND LICENSE
 
-Copyright (C) 2010, 2012, 2014 by Qindel Formacion y Servicios S.L.
+Copyright (C) 2010, 2012, 2014 by Qindel FormaciE<oacute>n y Servicios S.L.
 
 This library is free software; you can redistribute it and/or modify
 it under the same terms as Perl itself, either Perl version 5.10.1 or,
