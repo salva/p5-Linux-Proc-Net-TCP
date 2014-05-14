@@ -1,5 +1,9 @@
 Revision history for Perl extension Linux::Proc::Net::TCP.
 
+0.07  May 14, 2014
+        - add package Linux::Proc::Net::UDP for parsing UDP tables
+          /proc/net/udp and /proc/net/udp6
+
 0.06  May 7, 2014
         - work-around kernel bug (bug report and patch by Pavel
           Shaydo)
